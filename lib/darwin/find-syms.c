@@ -6,12 +6,21 @@
 #include <sys/mman.h>
 #include <limits.h>
 #include <fcntl.h>
+#include "ptrauth_helpers.h"
 
 #include "substitute.h"
 #include "substitute-internal.h"
 #include "dyld_cache_format.h"
 
-const struct dyld_all_image_infos *__dyld_get_all_image_infos() {
+const struct dyld_all_image_infos *dyld_get_all_image_infos() {
+    void *lib = dlopen("/usr/lib/system/libdyld.dylib", RTLD_LAZY);
+    if (lib != NULL){
+        struct dyld_all_image_infos *(*weak_dyld_get_all_image_infos)(void) = dlsym(lib, "_dyld_get_all_image_infos");
+        if (weak_dyld_get_all_image_infos != NULL){
+            return weak_dyld_get_all_image_infos();
+        }
+    }
+
     struct task_dyld_info dyld_info;
     mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
     if (task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&dyld_info, &count) == KERN_SUCCESS) {
@@ -20,17 +29,21 @@ const struct dyld_all_image_infos *__dyld_get_all_image_infos() {
         abort();
     }
 }
-const struct dyld_all_image_infos *(*dyld_get_all_image_infos)();
 
 static pthread_once_t dyld_inspect_once = PTHREAD_ONCE_INIT;
 /* and its fruits: */
 static uintptr_t (*ImageLoaderMachO_getSlide)(void *);
 static const struct mach_header *(*ImageLoaderMachO_machHeader)(void *);
 static bool (*dyld_validImage)(void *);
-uintptr_t (*ImageLoaderMegaDylib_getSlide)(void*);
-void *(*ImageLoaderMegaDylib_getIndexedMachHeader)(void*, unsigned index);
-void *(*ImageLoaderMegaDylib_isCacheHandle)(void*proxy, void* handle, unsigned* index, uint8_t* flags);
-void **dyld_sAllCacheImagesProxy;
+/*MegaDylib methods*/
+static uintptr_t (*ImageLoaderMegaDylib_getSlide)(void*);
+static void *(*ImageLoaderMegaDylib_getIndexedMachHeader)(void*, unsigned index);
+static void *(*ImageLoaderMegaDylib_isCacheHandle)(void*proxy, void* handle, unsigned* index, uint8_t* flags);
+static void **dyld_sAllCacheImagesProxy;
+/*dyld3 methods */
+static bool isUsingDyld3;
+static uintptr_t (*dyld3_MachOLoaded_getSlide)(const void *);
+
 
 static const struct dyld_cache_header *_Atomic s_cur_shared_cache_hdr;
 static int s_cur_shared_cache_fd;
@@ -308,12 +321,39 @@ static void inspect_dyld() {
     find_syms_raw(dyld_hdr, &dyld_slide, names, syms, 6);
     if (!syms[0] || !syms[1])
         substitute_panic("couldn't find ImageLoader methods\n");
-    ImageLoaderMachO_getSlide = syms[0];
-    ImageLoaderMachO_machHeader = syms[1];
+    ImageLoaderMachO_getSlide = make_sym_callable(syms[0]);
+    ImageLoaderMachO_machHeader = make_sym_callable(syms[1]);
     dyld_sAllCacheImagesProxy = syms[2];
-    ImageLoaderMegaDylib_isCacheHandle = syms[3];
-    ImageLoaderMegaDylib_getSlide = syms[4];
-    ImageLoaderMegaDylib_getIndexedMachHeader = syms[5];
+    ImageLoaderMegaDylib_isCacheHandle = make_sym_callable(syms[3]);
+    ImageLoaderMegaDylib_getSlide = make_sym_callable(syms[4]);
+    ImageLoaderMegaDylib_getIndexedMachHeader = make_sym_callable(syms[5]);
+
+    isUsingDyld3 = false;
+
+    const void *libdyld_hdr = NULL;
+    intptr_t libdyld_slide = 0;
+    for(uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *im_name = _dyld_get_image_name(i);
+        if (strcmp(im_name, "/usr/lib/system/libdyld.dylib") == 0){
+            libdyld_hdr = _dyld_get_image_header(i);
+            libdyld_slide = _dyld_get_image_vmaddr_slide(i);
+        }
+    }
+    if (libdyld_hdr == NULL){
+        return;
+    }
+    const char *libdyld_names[2] = {
+        "_gUseDyld3",
+        "__ZNK5dyld311MachOLoaded8getSlideEv"
+    };
+    void *libdyld_syms[2];
+    find_syms_raw(libdyld_hdr, &libdyld_slide, libdyld_names, libdyld_syms, 2);
+
+    if (libdyld_syms[0]){
+        isUsingDyld3 = *(bool *)(libdyld_syms[0]);
+
+        dyld3_MachOLoaded_getSlide = make_sym_callable(libdyld_syms[1]);
+    }
 }
 
 /* 'dlhandle' keeps the image alive */
@@ -321,23 +361,34 @@ EXPORT
 struct substitute_image *substitute_open_image(const char *filename) {
     pthread_once(&dyld_inspect_once, inspect_dyld);
 
+
     void *dlhandle = dlopen(filename, RTLD_LAZY | RTLD_LOCAL | RTLD_NOLOAD);
     if (!dlhandle)
         return NULL;
+
 
     void* image = (void*)(((uintptr_t)dlhandle) & (-4));
     unsigned index;
     uint8_t mode;
     const void *image_header;
     intptr_t slide;
-    if (ImageLoaderMegaDylib_isCacheHandle != NULL && ImageLoaderMegaDylib_isCacheHandle(*dyld_sAllCacheImagesProxy, image, &index, &mode)) {
+    if (isUsingDyld3){
+        image = (void*)((((uintptr_t)dlhandle) & (-2)) << 5);
+
+        uint32_t magic = *((uint32_t *)image);
+        if ((magic == MH_MAGIC || magic == MH_MAGIC_64) && dyld3_MachOLoaded_getSlide != NULL){
+            image_header = (const void *)image;
+
+            slide = dyld3_MachOLoaded_getSlide(image_header);
+        }
+    } else if (ImageLoaderMegaDylib_isCacheHandle != NULL && ImageLoaderMegaDylib_isCacheHandle(*dyld_sAllCacheImagesProxy, image, &index, &mode)) {
         if (ImageLoaderMegaDylib_getSlide == NULL || ImageLoaderMegaDylib_getIndexedMachHeader == NULL)
             substitute_panic("couldn't find ImageLoaderMegaDylib methods\n");
         slide = ImageLoaderMegaDylib_getSlide(*dyld_sAllCacheImagesProxy);
         image_header = ImageLoaderMegaDylib_getIndexedMachHeader(*dyld_sAllCacheImagesProxy, index);
     } else {
         image_header = ImageLoaderMachO_machHeader(image);
-      slide = ImageLoaderMachO_getSlide(image);
+        slide = ImageLoaderMachO_getSlide(image);
     }
 
     struct substitute_image *im = malloc(sizeof(*im));
@@ -362,17 +413,5 @@ int substitute_find_private_syms(struct substitute_image *im,
                                  size_t nsyms) {
     find_syms_raw(im->image_header, &im->slide, names, syms, nsyms);
     return SUBSTITUTE_OK;
-}
-
-
-__attribute__((constructor))
-void init(void) {
-    void *lib = dlopen("/usr/lib/system/libdyld.dylib", RTLD_LAZY);
-    if (lib != NULL)
-        dyld_get_all_image_infos = dlsym(lib, "_dyld_get_all_image_infos");
-
-    if (dyld_get_all_image_infos == NULL) {
-        dyld_get_all_image_infos = __dyld_get_all_image_infos;
-    }
 }
 #endif /* __APPLE__ */
