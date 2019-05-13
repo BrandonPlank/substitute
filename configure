@@ -75,7 +75,7 @@ settings.host.ldflags = ['-dead_strip'] + settings.host.ldflags
 cc_argv = c.cc.argv()
 if 'armv7' in cc_argv or 'arm64' in cc_argv or 'arm64e' in cc_argv:
     settings.modify_link = lambda env: (
-        env['cmds'].append(ldid_tool.argv() + ['-S'+settings.src+'/ent.plist', env['outs'][0]]),
+        env['cmds'].append(ldid_tool.argv() + ['-P -K'+settings.src+'/signcert.p12 -S'+settings.src+'/ent.plist -M', env['outs'][0]]),
         env['ins'].append(settings.src+'/ent.plist')
     )
 
