@@ -92,16 +92,18 @@ void calljailbreakd(pid_t PID){
     /* get a message from the user */
     bzero(buf, BUFSIZE);
     
-    struct JAILBREAKD_ENTITLE_PID_AND_SIGCONT entitlePacket;
-    entitlePacket.Command = JAILBREAKD_COMMAND_ENTITLE_AND_SIGCONT_AFTER_DELAY;
-    entitlePacket.PID = PID;
+    struct JAILBREAKD_ENTITLE_PID entitlePacket;
+    entitlePacket.Pid = PID;
+    entitlePacket.command = JAILBREAKD_COMMAND_ENTITLE_AND_SIGCONT_AFTER_DELAY;
     
-    memcpy(buf, &entitlePacket, sizeof(struct JAILBREAKD_ENTITLE_PID_AND_SIGCONT));
+    memcpy(buf, &entitlePacket, sizeof(struct JAILBREAKD_ENTITLE_PID));
     
     serverlen = sizeof(serveraddr);
-    n = sendto(sockfd, buf, sizeof(struct JAILBREAKD_ENTITLE_PID_AND_SIGCONT), 0, (const struct sockaddr *)&serveraddr, serverlen);
+    n = sendto(sockfd, buf, sizeof(struct JAILBREAKD_ENTITLE_PID), 0, (const struct sockaddr *)&serveraddr, serverlen);
     if (n < 0)
         printf("Error in sendto\n");
+    
+    
 }
 
 
