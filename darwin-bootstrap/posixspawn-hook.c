@@ -52,6 +52,19 @@
 #include <netdb.h>
 #include <pthread.h>
 
+
+
+FILE *file2LogTo;
+#define logToFile(fmt, args...)\
+do {\
+if (file2LogTo == NULL) {\
+file2LogTo = fopen("/var/log/pspawn.log", "a"); \
+if (file2LogTo == NULL) break; \
+} \
+fprintf(file2LogTo, fmt "\n", ##args); \
+fflush(file2LogTo); \
+} while(0)
+
 #define JAILBREAKD_COMMAND_ENTITLE_AND_SIGCONT_AFTER_DELAY 4
 struct __attribute__((__packed__)) JAILBREAKD_ENTITLE_PID_AND_SIGCONT {
     uint8_t Command;
@@ -152,25 +165,25 @@ static bool spawn_unrestrict(pid_t pid, bool should_resume, bool is_exec) {
     pid_t prog_pid;
     char *env[] = {"_MSSafeMode=1", NULL};
     if (old_posix_spawn(&prog_pid, prog, NULL, NULL, (char **) argv, env)) {
-        ib_log("posixspawn-hook: couldn't start unrestrict - oh well...");
+        logToFile("posixspawn-hook: couldn't start unrestrict - oh well...");
         return false;
     }
     if (IB_VERBOSE)
-        ib_log("unrestrict pid: %d; should_resume=%d is_exec=%d",
+        logToFile("unrestrict pid: %d; should_resume=%d is_exec=%d",
                prog_pid, should_resume, is_exec);
     int xstat;
     /* reap intermediate to avoid zombie - if it doesn't work, not a big deal */
     if (waitpid(prog_pid, &xstat, 0) == -1)
-        ib_log("posixspawn-hook: couldn't waitpid");
+        logToFile("posixspawn-hook: couldn't waitpid");
     if (IB_VERBOSE)
-        ib_log("unrestrict xstat=%x", xstat);
+        logToFile("unrestrict xstat=%x", xstat);
     return true;
 }
 
 static bool looks_restricted(const char *filename) {
     int fd = open(filename, O_RDONLY);
     if (fd == -1) {
-        ib_log("open '%s': %s", filename, strerror(errno));
+        logToFile("open '%s': %s", filename, strerror(errno));
         return false;
     }
     bool ret = false;
@@ -184,7 +197,7 @@ static bool looks_restricted(const char *filename) {
         struct mach_header mh;
     } u;
     if (read(fd, &u, sizeof(u)) != sizeof(u)) {
-        ib_log("read header for '%s': %s", filename, strerror(errno));
+        logToFile("read header for '%s': %s", filename, strerror(errno));
         goto end;
     }
     if (ntohl(u.magic) == FAT_MAGIC) {
@@ -194,7 +207,7 @@ static bool looks_restricted(const char *filename) {
             goto end;
         offset = ntohl(u.fa1.offset);
         if (pread(fd, &u, sizeof(u), offset) != sizeof(u)) {
-            ib_log("read header (inside fat) for '%s': %s",
+            logToFile("read header (inside fat) for '%s': %s",
                    filename, strerror(errno));
             goto end;
         }
@@ -218,7 +231,7 @@ static bool looks_restricted(const char *filename) {
         is64 = true;
         break;
     default:
-        ib_log("bad mach-o magic for '%s'", filename);
+        logToFile("bad mach-o magic for '%s'", filename);
         goto end;
     }
     uint32_t sizeofcmds = u.mh.sizeofcmds;
@@ -228,7 +241,7 @@ static bool looks_restricted(const char *filename) {
     char *cmds_buf = malloc(sizeofcmds);
     ssize_t actual = pread(fd, cmds_buf, sizeofcmds, offset);
     if (actual < 0 || (uint32_t) actual != sizeofcmds) {
-        ib_log("read load cmds for '%s': %s", filename, strerror(errno));
+        logToFile("read load cmds for '%s': %s", filename, strerror(errno));
         free(cmds_buf);
         goto end;
     }
@@ -258,13 +271,13 @@ static int hook_posix_spawn_generic(__typeof__(posix_spawn) *old,
         goto crap;
 
     if (IB_VERBOSE) {
-        ib_log("hook_posix_spawn_generic: path=%s%s%s (ld=%d)",
+        logToFile("hook_posix_spawn_generic: path=%s%s%s (ld=%d)",
                path,
                (flags & POSIX_SPAWN_SETEXEC) ? " (exec)" : "",
                (flags & POSIX_SPAWN_START_SUSPENDED) ? " (suspend)" : "",
                g_is_launchd);
         for (char *const *ap = argv; *ap; ap++)
-            ib_log("   %s", *ap);
+            logToFile("   %s", *ap);
     }
 
 
@@ -312,7 +325,7 @@ static int hook_posix_spawn_generic(__typeof__(posix_spawn) *old,
             !strcmp(path, "/usr/sbin/notifyd") ||
             !strcmp(xbasename(argv[0] ?: ""), "sshd"))
             goto skip;
-        dylib_to_add = bl_dylib;
+        //dylib_to_add = bl_dylib;
     }
 
     if (access(dylib_to_add, R_OK)) {
@@ -347,7 +360,7 @@ static int hook_posix_spawn_generic(__typeof__(posix_spawn) *old,
         if (advance(&env, "_MSSafeMode=") ||
             advance(&env, "_SubstituteSafeMode=")) {
             if (IB_VERBOSE)
-                ib_log("got safe mode env: %s", *ep);
+                logToFile("got safe mode env: %s", *ep);
             if (!strcmp(env, "0") || !strcmp(env, "NO"))
                 continue;
             else if (!strcmp(env, "1") || !strcmp(env, "YES"))
@@ -368,8 +381,8 @@ static int hook_posix_spawn_generic(__typeof__(posix_spawn) *old,
         const char *next = strchr(p, ':') ?: (p + strlen(p));
         /* append if it isn't one of ours */
         bool is_substitute =
-            (next - p == sizeof(bl_dylib) - 1 &&
-             !memcmp(p, bl_dylib, sizeof(bl_dylib) - 1)) ||
+            //(next - p == sizeof(bl_dylib) - 1 &&
+             //!memcmp(p, bl_dylib, sizeof(bl_dylib) - 1)) ||
             (next - p == sizeof(psh_dylib) - 1 &&
              !memcmp(p, psh_dylib, sizeof(psh_dylib) - 1));
         if (!is_substitute) {
@@ -390,7 +403,7 @@ static int hook_posix_spawn_generic(__typeof__(posix_spawn) *old,
         newp = stpcpy(newp, dylib_to_add);
     }
     if (IB_VERBOSE)
-        ib_log("using %s", new);
+        logToFile("using %s", new);
     /* no libraries? then just get rid of it */
     if (newp == newp_orig) {
         free(new);
@@ -427,7 +440,7 @@ static int hook_posix_spawn_generic(__typeof__(posix_spawn) *old,
         if (flags & POSIX_SPAWN_SETEXEC) {
             /* make the marker fd; hope you weren't using that */
             if (dup2(2, 255) != 255) {
-                ib_log("dup2 failure - %s", strerror(errno));
+                logToFile("dup2 failure - %s", strerror(errno));
                 goto skip;
             }
             if (fcntl(255, F_SETFD, FD_CLOEXEC))
@@ -437,14 +450,14 @@ static int hook_posix_spawn_generic(__typeof__(posix_spawn) *old,
         }
     }
     if (IB_VERBOSE)
-        ib_log("**");
+        logToFile("**");
     if (!g_is_launchd) {
-        ib_log("non-launchd, calling jailbreakd on ourselves");
+        logToFile("non-launchd, calling jailbreakd on ourselves");
         calljailbreakd(getpid());
     }
     int ret = old(pidp, path, file_actions, &my_attr, argv, envp_to_use);
     if (IB_VERBOSE)
-        ib_log("ret=%d pid=%ld", ret, (long) *pidp);
+        logToFile("ret=%d pid=%ld", ret, (long) *pidp);
 
     if (ret)
         goto cleanup;
@@ -505,7 +518,7 @@ static void after_wait_generic(pid_t pid, int stat) {
     if (!bucket) {
         /* probably spawned some other way / not a task */
         if (IB_VERBOSE)
-            ib_log("reaped unknown pid %d", pid);
+            logToFile("reaped unknown pid %d", pid);
         goto end;
     }
     char *bundleid = bucket->value;
@@ -555,7 +568,7 @@ static int hook_xpc_pipe_try_receive(mach_port_t port_set, xxpc_object_t *reques
     pid_t pid;
     audit_token_to_au32(at, NULL, &euid, NULL, NULL, NULL, &pid, NULL, NULL);
     if (euid != 0) {
-        ib_log("Attempt to perform hook-operation by pid %d with euid %d",
+        logToFile("Attempt to perform hook-operation by pid %d with euid %d",
                euid, pid);
         return res;
     }
@@ -572,26 +585,26 @@ static int hook_xpc_pipe_try_receive(mach_port_t port_set, xxpc_object_t *reques
         if (fate) {
             if (IB_VERBOSE) {
                 char *desc = xxpc_copy_description(fate);
-                ib_log("your (%s) fate is %s", bundleid, desc);
+                logToFile("your (%s) fate is %s", bundleid, desc);
                 free(desc);
             }
             xxpc_dictionary_set_value(out, "fate", fate);
         } else {
             if (IB_VERBOSE)
-                ib_log("your (%s) fate is unavailable", bundleid);
+                logToFile("your (%s) fate is unavailable", bundleid);
         }
         pthread_mutex_unlock(&g_state_lock);
         xxpc_dictionary_set_value(reply, "out", out);
         xxpc_release(out);
     } else {
-        ib_log("unknown hook-operation '%s'", name);
+        logToFile("unknown hook-operation '%s'", name);
         return res;
     }
 
     if (reply) {
         int reply_res = xxpc_pipe_routine_reply(reply);
         if (reply_res) {
-            ib_log("xxpc_pipe_routine_reply: %d", reply_res);
+            logToFile("xxpc_pipe_routine_reply: %d", reply_res);
             return res;
         }
         xxpc_release(reply);
@@ -601,7 +614,7 @@ static int hook_xpc_pipe_try_receive(mach_port_t port_set, xxpc_object_t *reques
     return 0;
 
 invalid:
-    ib_log("invalid hook-operation='%s' message", name);
+    logToFile("invalid hook-operation='%s' message", name);
     return res;
 }
 
@@ -642,7 +655,7 @@ void substitute_init(struct shuttle *shuttle, size_t nshuttle) {
     done_hdr.msgh_id = 42;
     kern_return_t kr = mach_msg_send(&done_hdr);
     if (kr)
-        ib_log("posixspawn-hook: mach_msg_send failed: kr=%x", kr);
+        logToFile("posixspawn-hook: mach_msg_send failed: kr=%x", kr);
     /* MOVE deallocated the port */
 }
 
@@ -668,7 +681,7 @@ static void init() {
     g_is_launchd = !!strstr(image0, "launchd");
     struct substitute_image *im = substitute_open_image(image0);
     if (!im) {
-        ib_log("posixspawn-hook: substitute_open_image failed");
+        logToFile("posixspawn-hook: substitute_open_image failed");
         goto end;
     }
 
@@ -685,7 +698,7 @@ static void init() {
     int err = substitute_interpose_imports(im, hooks, sizeof(hooks)/sizeof(*hooks),
                                            NULL, 0);
     if (err) {
-        ib_log("posixspawn-hook: substitute_interpose_imports failed: %s",
+        logToFile("posixspawn-hook: substitute_interpose_imports failed: %s",
                substitute_strerror(err));
         goto end;
     }
